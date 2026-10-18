@@ -13,6 +13,8 @@ Tampermonkey scripts for ALX Cellular's RepairShopr.
 | Injured Gadgets | .csv | `sku,qty` |
 | Phone LCD Parts | .csv | `sku,qty` |
 
+The click that starts the download also opens that supplier's quick-order page in a new tab, ready for the import.
+
 The SKU comes from the line's **Vendor SKU** only. Lines with no Vendor SKU or a zero quantity are left out and listed before downloading. Duplicate SKUs are combined.
 
 **Install:** with Tampermonkey in Chrome, open
