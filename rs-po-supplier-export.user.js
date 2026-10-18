@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RepairShopr PO → Supplier Import File
 // @namespace    https://alxcellular.repairshopr.com/
-// @version      1.1.0
+// @version      1.2.0
 // @description  Adds one button to a RepairShopr Purchase Order that downloads the cart-import file in the format of the PO's vendor (Mobile Sentrix, WGP, Injured Gadgets, Phone LCD Parts).
 // @homepageURL  https://github.com/alxcellular/repairshopr-userscripts
 // @updateURL    https://raw.githubusercontent.com/alxcellular/repairshopr-userscripts/main/rs-po-supplier-export.user.js
@@ -25,20 +25,29 @@
    *   header      column titles, exactly as the supplier's sample file has them
    *   numericSku  xlsx only: write all-digit SKUs as numbers (Mobile Sentrix sample does)
    *   skuCheck    optional: SKUs that don't match are listed for review before download
+   *   orderUrl    the supplier's quick-order page, opened in a new tab with the download
    * ------------------------------------------------------------------ */
   const SUPPLIERS = [
     {
       name: 'Mobile Sentrix', match: /^mobile\s*sentrix$/i,
       type: 'xlsx', sheet: 'Worksheet', header: ['SKU', 'Qty'], boldHeader: true, numericSku: true,
       skuCheck: /^\d{12}$/, skuHint: '12-digit MobileSentrix item number',
+      orderUrl: 'https://www.mobilesentrix.com/quickorder/index/view',
     },
     {
       name: 'WGP', match: /^wgp$/i,
       type: 'xlsx', sheet: 'Sheet1', header: ['sku', 'quantity'],
       skuCheck: /^WG\d+$/i, skuHint: 'WGP number like WG53247',
+      orderUrl: 'https://wgp.com/quick-order',
     },
-    { name: 'Injured Gadgets', match: /^injured\s*gadgets$/i, type: 'csv', header: ['sku', 'qty'] },
-    { name: 'Phone LCD Parts', match: /^phone\s*lcd\s*parts$/i, type: 'csv', header: ['sku', 'qty'] },
+    {
+      name: 'Injured Gadgets', match: /^injured\s*gadgets$/i, type: 'csv', header: ['sku', 'qty'],
+      orderUrl: 'https://www.injuredgadgets.com/expressorder/index/view',
+    },
+    {
+      name: 'Phone LCD Parts', match: /^phone\s*lcd\s*parts$/i, type: 'csv', header: ['sku', 'qty'],
+      orderUrl: 'https://www.phonelcdparts.com/quickorder/index/view/',
+    },
   ];
   const SKU_COLUMN = 'Vendor SKU'; // per-vendor SKU in RS; UPC is ignored on purpose
   const QTY_COLUMN = 'Quantity';
@@ -216,6 +225,16 @@
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
   }
 
+  function openOrderPage(s) {
+    if (!s.orderUrl) return;
+    const w = window.open(s.orderUrl, '_blank');
+    if (w) { w.opener = null; return; }
+    // Popup blocked (e.g. the PO export took too long after the click): offer a link instead
+    modal(`Open ${s.name} quick order`,
+      `<p>The browser blocked the new tab. The import file was downloaded.</p>` +
+      `<p><a href="${esc(s.orderUrl)}" target="_blank" rel="noopener">Open ${esc(s.name)} quick order →</a></p>`);
+  }
+
   /* ------------------------------------------------------------------ *
    * Button
    * ------------------------------------------------------------------ */
@@ -231,6 +250,7 @@
     const go = () => {
       closeModal();
       download(supplier.type === 'xlsx' ? buildXlsx(supplier, po.items) : buildCsv(supplier, po.items), filename);
+      openOrderPage(supplier);
       setLabel(`✓ ${po.items.length} SKUs, ${total} units`);
       setTimeout(() => setLabel(), 4000);
     };
