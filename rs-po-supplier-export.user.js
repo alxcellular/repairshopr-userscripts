@@ -71,7 +71,7 @@
     #rspo-box button{border:0;border-radius:5px;padding:7px 12px;cursor:pointer;font-size:13px}
     #rspo-box .pri{background:#2ca01c;color:#fff}#rspo-box .sec{background:#e6e6e6}#rspo-box .warn{background:#f0ad4e;color:#fff}
     #rspo-btn{margin-right:4px}
-    #rspo-banner{position:fixed;top:12px;right:12px;z-index:99999;width:min(400px,92vw);padding:12px 32px 12px 14px;border-radius:8px;color:#fff;font:14px/1.45 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.25)}
+    #rspo-banner{position:fixed;top:100px;right:12px;z-index:99999;width:min(400px,92vw);padding:12px 32px 12px 14px;border-radius:8px;color:#fff;font:14px/1.45 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.25)}
     #rspo-banner.busy{background:#3b5b7a}#rspo-banner.ok{background:#2ca01c}#rspo-banner.warn{background:#c77700}#rspo-banner.err{background:#b00020}
     #rspo-banner ul{margin:6px 0;padding-left:18px}#rspo-banner code{background:rgba(255,255,255,.2);padding:0 4px;border-radius:3px}
     #rspo-banner .x{position:absolute;top:6px;right:10px;cursor:pointer;font-size:18px;line-height:1}`;
