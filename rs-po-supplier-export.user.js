@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RepairShopr PO → Supplier Import File
 // @namespace    https://alxcellular.repairshopr.com/
-// @version      1.5.0
+// @version      1.5.1
 // @description  Adds one button to a RepairShopr Purchase Order that puts the PO's items into the vendor's cart (Mobile Sentrix, WGP, Phone LCD Parts) or downloads the vendor's cart-import file (Injured Gadgets) and opens its quick-order page.
 // @homepageURL  https://github.com/alxcellular/repairshopr-userscripts
 // @updateURL    https://raw.githubusercontent.com/alxcellular/repairshopr-userscripts/main/rs-po-supplier-export.user.js
@@ -318,7 +318,9 @@
   }
 
   async function readPo(supplier) {
-    const res = await fetch(`/purchase_orders/${PO_ID}.csv`, { credentials: 'same-origin' });
+    // RS serves the export with "Cache-Control: public, max-age=14400", so without this Chrome
+    // reuses a copy up to 4 hours old and edits to the PO are missed
+    const res = await fetch(`/purchase_orders/${PO_ID}.csv?_=${Date.now()}`, { credentials: 'same-origin', cache: 'no-store' });
     if (!res.ok) throw new Error(`RepairShopr CSV export failed (HTTP ${res.status}).`);
     const lines = parseCsv(await res.text());
     const missing = lines.length ? [SKU_COLUMN, QTY_COLUMN].filter((c) => !(c in lines[0])) : [];
