@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RepairShopr PO → Supplier Import File
 // @namespace    https://alxcellular.repairshopr.com/
-// @version      1.3.0
+// @version      1.3.1
 // @description  Adds one button to a RepairShopr Purchase Order that downloads the cart-import file in the format of the PO's vendor (Mobile Sentrix, WGP, Injured Gadgets, Phone LCD Parts), opens the supplier's quick-order page and, for Mobile Sentrix, adds the items to the cart.
 // @homepageURL  https://github.com/alxcellular/repairshopr-userscripts
 // @updateURL    https://raw.githubusercontent.com/alxcellular/repairshopr-userscripts/main/rs-po-supplier-export.user.js
@@ -74,6 +74,7 @@
     #rspo-banner{position:fixed;top:100px;right:12px;z-index:99999;width:min(400px,92vw);padding:12px 32px 12px 14px;border-radius:8px;color:#fff;font:14px/1.45 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.25)}
     #rspo-banner.busy{background:#3b5b7a}#rspo-banner.ok{background:#2ca01c}#rspo-banner.warn{background:#c77700}#rspo-banner.err{background:#b00020}
     #rspo-banner ul{margin:6px 0;padding-left:18px}#rspo-banner code{background:rgba(255,255,255,.2);padding:0 4px;border-radius:3px}
+    #rspo-banner a.dl{color:#fff;font-weight:600;text-decoration:underline}
     #rspo-banner .x{position:absolute;top:6px;right:10px;cursor:pointer;font-size:18px;line-height:1}`;
   document.head.appendChild(Object.assign(document.createElement('style'), { textContent: css }));
 
@@ -134,13 +135,15 @@
     GM_deleteValue(JOB_KEY); // one shot: reloading the page must not import twice
     if (Date.now() - job.at > JOB_MAX_AGE) return;
     banner(`Adding ${esc(job.poNumber)} to your ${esc(s.name)} cart (${job.skus} SKUs, ${job.units} units)…`, 'busy');
+    const file = new File([Uint8Array.from(atob(job.data), (c) => c.charCodeAt(0))], job.filename, { type: job.mime });
     try {
-      const bytes = Uint8Array.from(atob(job.data), (c) => c.charCodeAt(0));
-      const r = await s.autoImport(new File([bytes], job.filename, { type: job.mime }), job);
+      const r = await s.autoImport(file, job);
       banner(r.html, r.ok ? 'ok' : 'warn');
     } catch (e) {
+      // The file is only downloaded when the automatic import fails
       banner(`Couldn't add ${esc(job.poNumber)} to the cart automatically: ${esc(e.message)}.<br>` +
-        `<code>${esc(job.filename)}</code> was downloaded — import it with the upload button.`, 'err');
+        `<a class="dl" href="${URL.createObjectURL(file)}" download="${esc(job.filename)}">Download ${esc(job.filename)}</a> ` +
+        `and import it with the upload button.`, 'err');
     }
   }
 
@@ -334,7 +337,9 @@
     if (w) { w.opener = null; return; }
     // Popup blocked (e.g. the PO export took too long after the click): offer a link instead
     modal(`Open ${s.name} quick order`,
-      `<p>The browser blocked the new tab. The import file was downloaded.</p>` +
+      `<p>The browser blocked the new tab. ${s.autoImport
+        ? 'Open it within 10 minutes and the items are added to the cart there.'
+        : 'The import file was downloaded.'}</p>` +
       `<p><a href="${esc(s.orderUrl)}" target="_blank" rel="noopener">Open ${esc(s.name)} quick order →</a></p>`);
   }
 
@@ -353,12 +358,14 @@
     const go = () => {
       closeModal();
       const bytes = buildFile(supplier, po.items);
-      download(new Blob([bytes], { type: MIME[supplier.type] }), filename); // kept as a manual fallback
       if (supplier.autoImport) {
+        // No download: the supplier tab imports the file, and offers it only if that fails
         GM_setValue(JOB_KEY, {
           supplier: supplier.name, poNumber: po.poNumber, filename, mime: MIME[supplier.type],
           data: toBase64(bytes), skus: po.items.length, units: total, at: Date.now(),
         });
+      } else {
+        download(new Blob([bytes], { type: MIME[supplier.type] }), filename);
       }
       openOrderPage(supplier);
       setLabel(`✓ ${po.items.length} SKUs, ${total} units`);
@@ -368,11 +375,12 @@
       return modal('Nothing to export', `<p>None of the ${po.lineCount} line(s) on this PO have both a SKU and a quantity.</p>${list('Skipped', po.skipped)}`);
     }
     if (po.skipped.length || po.flagged.length) {
-      return modal(`Check before downloading: ${supplier.name}`,
-        `<p>${po.items.length} SKUs (${total} units) will be in <code>${esc(filename)}</code>.</p>` +
+      const auto = !!supplier.autoImport;
+      return modal(`Check before ${auto ? 'adding to cart' : 'downloading'}: ${supplier.name}`,
+        `<p>${po.items.length} SKUs (${total} units) will be ${auto ? `added to your ${esc(supplier.name)} cart` : `in <code>${esc(filename)}</code>`}.</p>` +
         list('Left out — add these by hand on the supplier site', po.skipped.map(esc)) +
         list(`Included, but the SKU doesn't look like a ${esc(supplier.skuHint)} — the supplier's import may reject it`, po.flagged),
-        [{ label: 'Cancel', onClick: closeModal }, { label: 'Download anyway', cls: 'warn', onClick: go }]);
+        [{ label: 'Cancel', onClick: closeModal }, { label: auto ? 'Add to cart anyway' : 'Download anyway', cls: 'warn', onClick: go }]);
     }
     go();
   }
