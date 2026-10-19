@@ -1,22 +1,21 @@
 // ==UserScript==
 // @name         RepairShopr PO → Supplier Import File
 // @namespace    https://alxcellular.repairshopr.com/
-// @version      1.2.0
-// @description  Adds one button to a RepairShopr Purchase Order that downloads the cart-import file in the format of the PO's vendor (Mobile Sentrix, WGP, Injured Gadgets, Phone LCD Parts).
+// @version      1.3.0
+// @description  Adds one button to a RepairShopr Purchase Order that downloads the cart-import file in the format of the PO's vendor (Mobile Sentrix, WGP, Injured Gadgets, Phone LCD Parts), opens the supplier's quick-order page and, for Mobile Sentrix, adds the items to the cart.
 // @homepageURL  https://github.com/alxcellular/repairshopr-userscripts
 // @updateURL    https://raw.githubusercontent.com/alxcellular/repairshopr-userscripts/main/rs-po-supplier-export.user.js
 // @downloadURL  https://raw.githubusercontent.com/alxcellular/repairshopr-userscripts/main/rs-po-supplier-export.user.js
 // @match        https://alxcellular.repairshopr.com/purchase_orders/*
-// @grant        none
+// @match        https://www.mobilesentrix.com/quickorder/index/view*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_deleteValue
 // @run-at       document-idle
 // ==/UserScript==
 
 (function () {
   'use strict';
-
-  const m = location.pathname.match(/^\/purchase_orders\/(\d+)\/?$/);
-  if (!m) return; // only the PO detail page
-  const PO_ID = m[1];
 
   /* ------------------------------------------------------------------ *
    * Supplier formats. `match` is tested against the vendor name on the PO.
@@ -26,6 +25,8 @@
    *   numericSku  xlsx only: write all-digit SKUs as numbers (Mobile Sentrix sample does)
    *   skuCheck    optional: SKUs that don't match are listed for review before download
    *   orderUrl    the supplier's quick-order page, opened in a new tab with the download
+   *   autoImport  optional: runs on orderUrl and puts the file into the supplier's cart
+   *               (the page must also be listed as an @match in the header)
    * ------------------------------------------------------------------ */
   const SUPPLIERS = [
     {
@@ -33,6 +34,7 @@
       type: 'xlsx', sheet: 'Worksheet', header: ['SKU', 'Qty'], boldHeader: true, numericSku: true,
       skuCheck: /^\d{12}$/, skuHint: '12-digit MobileSentrix item number',
       orderUrl: 'https://www.mobilesentrix.com/quickorder/index/view',
+      autoImport: mobileSentrixImport,
     },
     {
       name: 'WGP', match: /^wgp$/i,
@@ -51,6 +53,9 @@
   ];
   const SKU_COLUMN = 'Vendor SKU'; // per-vendor SKU in RS; UPC is ignored on purpose
   const QTY_COLUMN = 'Quantity';
+  // Hand-off from the PO page to the supplier tab (Tampermonkey storage is shared across sites)
+  const JOB_KEY = 'pendingImport';
+  const JOB_MAX_AGE = 10 * 60 * 1000; // older jobs are dropped, so opening the page later never re-imports
 
   /* ------------------------------------------------------------------ *
    * Small UI helpers (no alert/confirm dialogs)
@@ -65,7 +70,11 @@
     #rspo-box .btns{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
     #rspo-box button{border:0;border-radius:5px;padding:7px 12px;cursor:pointer;font-size:13px}
     #rspo-box .pri{background:#2ca01c;color:#fff}#rspo-box .sec{background:#e6e6e6}#rspo-box .warn{background:#f0ad4e;color:#fff}
-    #rspo-btn{margin-right:4px}`;
+    #rspo-btn{margin-right:4px}
+    #rspo-banner{position:fixed;top:12px;right:12px;z-index:99999;width:min(400px,92vw);padding:12px 32px 12px 14px;border-radius:8px;color:#fff;font:14px/1.45 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.25)}
+    #rspo-banner.busy{background:#3b5b7a}#rspo-banner.ok{background:#2ca01c}#rspo-banner.warn{background:#c77700}#rspo-banner.err{background:#b00020}
+    #rspo-banner ul{margin:6px 0;padding-left:18px}#rspo-banner code{background:rgba(255,255,255,.2);padding:0 4px;border-radius:3px}
+    #rspo-banner .x{position:absolute;top:6px;right:10px;cursor:pointer;font-size:18px;line-height:1}`;
   document.head.appendChild(Object.assign(document.createElement('style'), { textContent: css }));
 
   function modal(title, bodyHtml, buttons) {
@@ -88,6 +97,91 @@
   }
   const closeModal = () => document.getElementById('rspo-overlay')?.remove();
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  function banner(html, kind) {
+    let el = document.getElementById('rspo-banner');
+    if (!el) {
+      el = Object.assign(document.createElement('div'), { id: 'rspo-banner' });
+      document.body.appendChild(el);
+    }
+    el.className = kind;
+    el.innerHTML = `<span class="x" title="Close">×</span>${html}`;
+    el.querySelector('.x').onclick = () => el.remove();
+  }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function waitFor(fn, ms, failMsg) {
+    const end = Date.now() + ms;
+    for (;;) {
+      const v = fn();
+      if (v) return v;
+      if (Date.now() > end) throw new Error(failMsg);
+      await sleep(250);
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * On a supplier's quick-order page: finish the import started on the PO
+   * ------------------------------------------------------------------ */
+  if (location.hostname !== 'alxcellular.repairshopr.com') {
+    const s = SUPPLIERS.find((x) => x.autoImport && new URL(x.orderUrl).hostname === location.hostname);
+    if (s) runPendingImport(s);
+    return;
+  }
+
+  async function runPendingImport(s) {
+    const job = GM_getValue(JOB_KEY);
+    if (!job || job.supplier !== s.name) return;
+    GM_deleteValue(JOB_KEY); // one shot: reloading the page must not import twice
+    if (Date.now() - job.at > JOB_MAX_AGE) return;
+    banner(`Adding ${esc(job.poNumber)} to your ${esc(s.name)} cart (${job.skus} SKUs, ${job.units} units)…`, 'busy');
+    try {
+      const bytes = Uint8Array.from(atob(job.data), (c) => c.charCodeAt(0));
+      const r = await s.autoImport(new File([bytes], job.filename, { type: job.mime }), job);
+      banner(r.html, r.ok ? 'ok' : 'warn');
+    } catch (e) {
+      banner(`Couldn't add ${esc(job.poNumber)} to the cart automatically: ${esc(e.message)}.<br>` +
+        `<code>${esc(job.filename)}</code> was downloaded — import it with the upload button.`, 'err');
+    }
+  }
+
+  // Mobile Sentrix quick order: Dropzone upload → "Import products" → rows/issues → "Add to cart"
+  async function mobileSentrixImport(file, job) {
+    const input = await waitFor(() => document.querySelector('input.dz-hidden-input'), 15000, 'the upload box was not found');
+    const importBtn = await waitFor(() => document.getElementById('import-products-btn'), 5000, 'the Import button was not found');
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files; // DOM-level hand-off works whatever world Tampermonkey runs the script in
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await waitFor(() => !importBtn.disabled, 5000, 'the upload box did not accept the file');
+    importBtn.click();
+
+    const rows = () => [...document.querySelectorAll('#new-list-row li.quick-product')]
+      .filter((li) => li.offsetHeight && /SKU:/.test(li.textContent));
+    const issues = () => [...document.querySelectorAll('#import-issues ul.error-list li')]
+      .filter((li) => li.offsetHeight).map((li) => li.textContent.replace(/\s+/g, ' ').replace(/^\s*\*\s*/, '').trim());
+    await waitFor(() => rows().length || issues().length, 30000, 'Mobile Sentrix did not finish reading the file');
+    await sleep(800); // both lists render from the same response; give the second one a moment
+
+    const n = rows().length, problems = issues();
+    if (problems.length) {
+      return {
+        ok: false,
+        html: `<b>${esc(job.poNumber)}</b>: ${n} item(s) imported, but Mobile Sentrix reported ${problems.length} issue(s):` +
+          `<ul>${problems.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>Nothing was added yet. Fix or remove those lines below, then click <b>Add to cart</b>.`,
+      };
+    }
+    document.getElementById('quickorder-cart').click();
+    await waitFor(() => rows().length === 0, 20000, 'Add to cart did not finish'); // the table empties once added
+    const mismatch = n !== job.skus ? ` (the PO had ${job.skus} SKUs — check the cart)` : '';
+    return { ok: true, html: `✓ Added <b>${esc(job.poNumber)}</b> to your cart: ${n} items, ${job.units} units${mismatch}. Review the cart before checking out.` };
+  }
+
+  /* ------------------------------------------------------------------ *
+   * On RepairShopr: the PO detail page
+   * ------------------------------------------------------------------ */
+  const m = location.pathname.match(/^\/purchase_orders\/(\d+)\/?$/);
+  if (!m) return;
+  const PO_ID = m[1];
 
   /* ------------------------------------------------------------------ *
    * Read the PO: vendor from the page, line items from RS's own CSV export
@@ -143,10 +237,13 @@
   /* ------------------------------------------------------------------ *
    * File builders
    * ------------------------------------------------------------------ */
+  const MIME = { csv: 'text/csv', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' };
+  const buildFile = (s, items) => (s.type === 'xlsx' ? buildXlsx(s, items) : buildCsv(s, items)); // -> Uint8Array
+
   function buildCsv(s, items) {
     const q = (v) => (/[",\r\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
     const out = [s.header.map(q).join(','), ...items.map((it) => `${q(it.sku)},${it.qty}`)].join('\n') + '\n';
-    return new Blob([out], { type: 'text/csv' });
+    return new TextEncoder().encode(out);
   }
 
   function buildXlsx(s, items) {
@@ -175,7 +272,7 @@
       'xl/worksheets/sheet1.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="${NS}/spreadsheetml/2006/main"><dimension ref="A1:B${items.length + 1}"/><cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="9" customWidth="1"/></cols><sheetData>${rows.join('')}</sheetData></worksheet>`,
     };
     files['xl/sharedStrings.xml'] = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="${NS}/spreadsheetml/2006/main" count="${strings.length}" uniqueCount="${strings.length}">${strings.map((t) => `<si><t>${x(t)}</t></si>`).join('')}</sst>`;
-    return new Blob([zipStore(files)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return zipStore(files);
   }
 
   // Minimal uncompressed ZIP writer (an .xlsx is a zip of XML files).
@@ -218,6 +315,12 @@
     return out;
   }
 
+  function toBase64(bytes) {
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(s);
+  }
+
   function download(blob, filename) {
     const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: filename });
     document.body.appendChild(a);
@@ -249,7 +352,14 @@
     const total = po.items.reduce((a, it) => a + it.qty, 0);
     const go = () => {
       closeModal();
-      download(supplier.type === 'xlsx' ? buildXlsx(supplier, po.items) : buildCsv(supplier, po.items), filename);
+      const bytes = buildFile(supplier, po.items);
+      download(new Blob([bytes], { type: MIME[supplier.type] }), filename); // kept as a manual fallback
+      if (supplier.autoImport) {
+        GM_setValue(JOB_KEY, {
+          supplier: supplier.name, poNumber: po.poNumber, filename, mime: MIME[supplier.type],
+          data: toBase64(bytes), skus: po.items.length, units: total, at: Date.now(),
+        });
+      }
       openOrderPage(supplier);
       setLabel(`✓ ${po.items.length} SKUs, ${total} units`);
       setTimeout(() => setLabel(), 4000);
@@ -271,10 +381,11 @@
   let btn;
   const setLabel = (text) => {
     const s = supplierFor(vendorName());
-    btn.textContent = text || (s ? `⬇ ${s.name} import` : 'No import format for this vendor');
+    btn.textContent = text || (!s ? 'No import format for this vendor' : s.autoImport ? `🛒 ${s.name}: add to cart` : `⬇ ${s.name} import`);
     btn.disabled = !s;
-    btn.title = s ? `Download the ${s.name} cart-import ${s.type.toUpperCase()} for this PO`
-      : `Vendor "${vendorName() || 'none'}" has no import format in the userscript`;
+    btn.title = !s ? `Vendor "${vendorName() || 'none'}" has no import format in the userscript`
+      : s.autoImport ? `Download the ${s.name} import file and add the items to your ${s.name} cart`
+        : `Download the ${s.name} cart-import ${s.type.toUpperCase()} for this PO and open ${s.name} quick order`;
   };
 
   function addButton() {
