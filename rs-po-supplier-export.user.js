@@ -1,13 +1,16 @@
 // ==UserScript==
 // @name         RepairShopr PO → Supplier Import File
 // @namespace    https://alxcellular.repairshopr.com/
-// @version      1.4.0
-// @description  Adds one button to a RepairShopr Purchase Order that downloads the cart-import file in the format of the PO's vendor (Mobile Sentrix, WGP, Injured Gadgets, Phone LCD Parts), opens the supplier's quick-order page and, for Mobile Sentrix, adds the items to the cart.
+// @version      1.5.0
+// @description  Adds one button to a RepairShopr Purchase Order that puts the PO's items into the vendor's cart (Mobile Sentrix, WGP, Phone LCD Parts) or downloads the vendor's cart-import file (Injured Gadgets) and opens its quick-order page.
 // @homepageURL  https://github.com/alxcellular/repairshopr-userscripts
 // @updateURL    https://raw.githubusercontent.com/alxcellular/repairshopr-userscripts/main/rs-po-supplier-export.user.js
 // @downloadURL  https://raw.githubusercontent.com/alxcellular/repairshopr-userscripts/main/rs-po-supplier-export.user.js
 // @match        https://alxcellular.repairshopr.com/purchase_orders/*
 // @match        https://www.mobilesentrix.com/quickorder/index/view*
+// @match        https://wgp.com/quick-order*
+// @match        https://www.phonelcdparts.com/quickorder/index/view*
+// @match        https://www.phonelcdparts.com/checkout/cart*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
@@ -39,16 +42,19 @@
     {
       name: 'WGP', match: /^wgp$/i,
       type: 'xlsx', sheet: 'Sheet1', header: ['sku', 'quantity'],
-      skuCheck: /^WG\d+$/i, skuHint: 'WGP number like WG53247',
+      skuCheck: /^[A-Z]{2}\d{4,}$/i, skuHint: 'WGP item number like WG53247 or AP05759',
       orderUrl: 'https://wgp.com/quick-order',
+      autoImport: wgpImport,
     },
     {
+      // Quick order is switched off for our Injured Gadgets account, so this one stays download-only
       name: 'Injured Gadgets', match: /^injured\s*gadgets$/i, type: 'csv', header: ['sku', 'qty'],
       orderUrl: 'https://www.injuredgadgets.com/expressorder/index/view',
     },
     {
       name: 'Phone LCD Parts', match: /^phone\s*lcd\s*parts$/i, type: 'csv', header: ['sku', 'qty'],
       orderUrl: 'https://www.phonelcdparts.com/quickorder/index/view/',
+      autoImport: phoneLcdPartsImport,
     },
   ];
   const SKU_COLUMN = 'Vendor SKU'; // per-vendor SKU in RS; UPC is ignored on purpose
@@ -56,6 +62,9 @@
   // Hand-off from the PO page to the supplier tab (Tampermonkey storage is shared across sites)
   const JOB_KEY = 'pendingImport';
   const JOB_MAX_AGE = 10 * 60 * 1000; // older jobs are dropped, so opening the page later never re-imports
+  // Result to show after a supplier page navigates away on Add to cart (Phone LCD Parts goes to its cart)
+  const REPORT_KEY = 'importReport';
+  const REPORT_MAX_AGE = 2 * 60 * 1000;
 
   /* ------------------------------------------------------------------ *
    * Small UI helpers (no alert/confirm dialogs)
@@ -125,9 +134,26 @@
    * ------------------------------------------------------------------ */
   if (location.hostname !== 'alxcellular.repairshopr.com') {
     const s = SUPPLIERS.find((x) => x.autoImport && new URL(x.orderUrl).hostname === location.hostname);
-    if (s) runPendingImport(s);
+    if (s) {
+      showPendingReport(s);
+      if (location.pathname.startsWith(new URL(s.orderUrl).pathname.replace(/\/$/, ''))) runPendingImport(s);
+    }
     return;
   }
+
+  function showPendingReport(s) {
+    const rep = GM_getValue(REPORT_KEY);
+    if (!rep || rep.supplier !== s.name) return;
+    GM_deleteValue(REPORT_KEY);
+    if (Date.now() - rep.at < REPORT_MAX_AGE) banner(rep.html, rep.kind);
+  }
+
+  // SKUs from the PO that the supplier page didn't load (compared case-insensitively)
+  const missingSkus = (job, loaded) => {
+    const have = new Set(loaded.map((x) => x.trim().toUpperCase()));
+    return job.lines.filter(([sku]) => !have.has(String(sku).trim().toUpperCase())).map(([sku, qty]) => `${sku} × ${qty}`);
+  };
+  const listHtml = (items) => `<ul>${items.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>`;
 
   async function runPendingImport(s) {
     const job = GM_getValue(JOB_KEY);
@@ -138,8 +164,9 @@
     const file = new File([Uint8Array.from(atob(job.data), (c) => c.charCodeAt(0))], job.filename, { type: job.mime });
     try {
       const r = await s.autoImport(file, job);
-      banner(r.html, r.ok ? 'ok' : 'warn');
+      if (r) banner(r.html, r.kind || (r.ok ? 'ok' : 'warn')); // no result: the page is moving on and shows the report itself
     } catch (e) {
+      GM_deleteValue(REPORT_KEY);
       // The file is only downloaded when the automatic import fails
       banner(`Couldn't add ${esc(job.poNumber)} to the cart automatically: ${esc(e.message)}.<br>` +
         `<a class="dl" href="${URL.createObjectURL(file)}" download="${esc(job.filename)}">Download ${esc(job.filename)}</a> ` +
@@ -177,6 +204,78 @@
     await waitFor(() => rows().length === 0, 20000, 'Add to cart did not finish'); // the table empties once added
     const mismatch = n !== job.skus ? ` (the PO had ${job.skus} SKUs — check the cart)` : '';
     return { ok: true, html: `✓ Added <b>${esc(job.poNumber)}</b> to your cart: ${n} items, ${job.units} units${mismatch}. Review the cart before checking out.` };
+  }
+
+  // WGP quick order: "Upload a file" box → its own "Add to cart" → green (added, maybe with skipped
+  // lines listed) or red (nothing added) result box. WGP adds the good lines even when others fail.
+  async function wgpImport(file, job) {
+    const input = await waitFor(() => document.querySelector('input[type=file][name=csv_file]'), 15000, 'the upload box was not found');
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    // the upload box's Add to cart is the one that shares a container with the file input
+    const addBtn = await waitFor(() => {
+      for (let box = input.parentElement; box && box !== document.body; box = box.parentElement) {
+        const b = [...box.querySelectorAll('button')].find((x) => /^\s*add to cart\s*$/i.test(x.textContent));
+        if (b) return !b.disabled && b;
+      }
+    }, 5000, 'the upload box did not accept the file');
+    const resultBoxes = () => [...document.querySelectorAll('div')]
+      .filter((d) => /\bborder-(green|red)-\d+/.test(d.className) && d.offsetHeight && d.innerText.trim());
+    const before = new Set(resultBoxes());
+    addBtn.click();
+
+    const result = () => resultBoxes().find((d) => !before.has(d));
+    const box = await waitFor(result, 30000, 'WGP did not confirm the cart update');
+    const ok = /border-green/.test(box.className);
+    const lines = box.innerText.split('\n').map((l) => l.trim())
+      .filter((l) => l && !/^go to checkout$/i.test(l) && !/all products added to cart successfully/i.test(l));
+    if (ok && !lines.length) {
+      return { ok: true, html: `✓ Added <b>${esc(job.poNumber)}</b> to your WGP cart: ${job.skus} items, ${job.units} units. Review the cart before checking out.` };
+    }
+    if (ok) {
+      return { ok: false, html: `<b>${esc(job.poNumber)}</b>: WGP added the other items to your cart, but not these:${listHtml(lines)}Add them another way or leave them off.` };
+    }
+    return { kind: 'err', html: `<b>${esc(job.poNumber)}</b>: WGP added nothing to the cart:${listHtml(lines)}` };
+  }
+
+  // Phone LCD Parts quick order: CSV → product rows → "Add to Cart" posts the rows and opens the cart
+  // page, where showPendingReport() shows the result. Unknown SKUs are silently dropped, so they are
+  // found by comparing the loaded rows with the PO.
+  async function phoneLcdPartsImport(file, job) {
+    const input = await waitFor(() => document.querySelector('input[type=file][accept=".csv"]'), 15000, 'the upload box was not found');
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const loaded = () => [...document.querySelectorAll('input')]
+      .filter((i) => i.offsetHeight && /name|sku/i.test(i.placeholder || '') && i.value.trim()).map((i) => i.value);
+    try {
+      await waitFor(() => loaded().length, 20000, '');
+    } catch (e) {
+      return { kind: 'err', html: `<b>${esc(job.poNumber)}</b>: Phone LCD Parts didn't recognise any of the ${job.skus} SKUs:${listHtml(missingSkus(job, []))}` };
+    }
+    let n = loaded().length; // let the rows settle: wait for 1s without the count changing
+    for (let stable = 0; stable < 4;) {
+      await sleep(250);
+      const c = loaded().length;
+      if (c === n) stable++; else { n = c; stable = 0; }
+    }
+    const missing = missingSkus(job, loaded());
+
+    GM_setValue(REPORT_KEY, {
+      supplier: 'Phone LCD Parts', at: Date.now(), kind: missing.length ? 'warn' : 'ok',
+      html: missing.length
+        ? `<b>${esc(job.poNumber)}</b>: added ${n} item(s) to your cart. Phone LCD Parts didn't recognise these, so they were left out:${listHtml(missing)}`
+        : `✓ Added <b>${esc(job.poNumber)}</b> to your cart: ${n} items, ${job.units} units. Review the cart before checking out.`,
+    });
+    const addBtn = [...document.querySelectorAll('button')].find((b) => b.offsetHeight && /^\s*add to cart\s*$/i.test(b.textContent));
+    if (!addBtn) throw new Error('the Add to Cart button was not found');
+    addBtn.click();
+    await sleep(20000); // normally the cart page has loaded long before this
+    throw new Error('Add to Cart did not open the cart');
   }
 
   /* ------------------------------------------------------------------ *
@@ -365,6 +464,7 @@
         GM_setValue(JOB_KEY, {
           supplier: supplier.name, poNumber: po.poNumber, filename, mime: MIME[supplier.type],
           data: toBase64(bytes), skus: po.items.length, units: total, at: Date.now(),
+          lines: po.items.map((it) => [it.sku, it.qty]),
         });
       } else {
         download(new Blob([bytes], { type: MIME[supplier.type] }), filename);
