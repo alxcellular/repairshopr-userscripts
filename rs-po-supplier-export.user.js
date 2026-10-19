@@ -148,12 +148,16 @@
     if (Date.now() - rep.at < REPORT_MAX_AGE) banner(rep.html, rep.kind);
   }
 
+  // Function declarations, not consts: the supplier-page branch above returns before
+  // any const below it is initialised.
   // SKUs from the PO that the supplier page didn't load (compared case-insensitively)
-  const missingSkus = (job, loaded) => {
+  function missingSkus(job, loaded) {
     const have = new Set(loaded.map((x) => x.trim().toUpperCase()));
     return job.lines.filter(([sku]) => !have.has(String(sku).trim().toUpperCase())).map(([sku, qty]) => `${sku} × ${qty}`);
-  };
-  const listHtml = (items) => `<ul>${items.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>`;
+  }
+  function listHtml(items) {
+    return `<ul>${items.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>`;
+  }
 
   async function runPendingImport(s) {
     const job = GM_getValue(JOB_KEY);
