@@ -15,7 +15,7 @@ Tampermonkey scripts for ALX Cellular's RepairShopr.
 
 The click that starts the download also opens that supplier's quick-order page in a new tab, ready for the import.
 
-**Mobile Sentrix** goes one step further: on its quick-order page the script imports the file and clicks **Add to cart** for you, then shows a green banner. If Mobile Sentrix reports an import issue (unknown SKU, restricted or out-of-stock item), it stops before adding anything and lists the issues in an orange banner. You must be logged in to Mobile Sentrix. The script never checks out. No file is downloaded for Mobile Sentrix; if the automatic import fails, a red banner offers the file to download and import by hand.
+**Mobile Sentrix** goes one step further: on its quick-order page the script imports the file and clicks **Add to cart** for you, then shows a green banner. If Mobile Sentrix reports an import issue (unknown SKU, restricted or out-of-stock item), it stops before adding anything and lists the issues in an orange banner. You must be logged in to Mobile Sentrix. The script never checks out. No file is downloaded for Mobile Sentrix by the cart button. To get the file instead, use the separate **⬇ File** button next to it (it only downloads; nothing goes to the cart). If the automatic import fails, the red banner also offers the file.
 
 The SKU comes from the line's **Vendor SKU** only. Lines with no Vendor SKU or a zero quantity are left out and listed before downloading. Duplicate SKUs are combined.
 

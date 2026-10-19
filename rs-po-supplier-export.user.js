@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RepairShopr PO → Supplier Import File
 // @namespace    https://alxcellular.repairshopr.com/
-// @version      1.3.1
+// @version      1.4.0
 // @description  Adds one button to a RepairShopr Purchase Order that downloads the cart-import file in the format of the PO's vendor (Mobile Sentrix, WGP, Injured Gadgets, Phone LCD Parts), opens the supplier's quick-order page and, for Mobile Sentrix, adds the items to the cart.
 // @homepageURL  https://github.com/alxcellular/repairshopr-userscripts
 // @updateURL    https://raw.githubusercontent.com/alxcellular/repairshopr-userscripts/main/rs-po-supplier-export.user.js
@@ -70,7 +70,7 @@
     #rspo-box .btns{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
     #rspo-box button{border:0;border-radius:5px;padding:7px 12px;cursor:pointer;font-size:13px}
     #rspo-box .pri{background:#2ca01c;color:#fff}#rspo-box .sec{background:#e6e6e6}#rspo-box .warn{background:#f0ad4e;color:#fff}
-    #rspo-btn{margin-right:4px}
+    #rspo-btn,#rspo-file-btn{margin-right:4px}
     #rspo-banner{position:fixed;top:100px;right:12px;z-index:99999;width:min(400px,92vw);padding:12px 32px 12px 14px;border-radius:8px;color:#fff;font:14px/1.45 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.25)}
     #rspo-banner.busy{background:#3b5b7a}#rspo-banner.ok{background:#2ca01c}#rspo-banner.warn{background:#c77700}#rspo-banner.err{background:#b00020}
     #rspo-banner ul{margin:6px 0;padding-left:18px}#rspo-banner code{background:rgba(255,255,255,.2);padding:0 4px;border-radius:3px}
@@ -344,9 +344,11 @@
   }
 
   /* ------------------------------------------------------------------ *
-   * Button
+   * Buttons: the main one (cart for auto-import suppliers, otherwise file + quick order)
+   * and, for auto-import suppliers, a separate "file only" download
    * ------------------------------------------------------------------ */
-  async function exportFor(supplier) {
+  async function exportFor(supplier, fileOnly) {
+    const auto = !!supplier.autoImport && !fileOnly;
     let po;
     try {
       po = await readPo(supplier);
@@ -358,8 +360,8 @@
     const go = () => {
       closeModal();
       const bytes = buildFile(supplier, po.items);
-      if (supplier.autoImport) {
-        // No download: the supplier tab imports the file, and offers it only if that fails
+      if (auto) {
+        // No download: the supplier tab imports the file (and offers it there only if that fails)
         GM_setValue(JOB_KEY, {
           supplier: supplier.name, poNumber: po.poNumber, filename, mime: MIME[supplier.type],
           data: toBase64(bytes), skus: po.items.length, units: total, at: Date.now(),
@@ -367,7 +369,7 @@
       } else {
         download(new Blob([bytes], { type: MIME[supplier.type] }), filename);
       }
-      openOrderPage(supplier);
+      if (!fileOnly) openOrderPage(supplier);
       setLabel(`✓ ${po.items.length} SKUs, ${total} units`);
       setTimeout(() => setLabel(), 4000);
     };
@@ -375,7 +377,6 @@
       return modal('Nothing to export', `<p>None of the ${po.lineCount} line(s) on this PO have both a SKU and a quantity.</p>${list('Skipped', po.skipped)}`);
     }
     if (po.skipped.length || po.flagged.length) {
-      const auto = !!supplier.autoImport;
       return modal(`Check before ${auto ? 'adding to cart' : 'downloading'}: ${supplier.name}`,
         `<p>${po.items.length} SKUs (${total} units) will be ${auto ? `added to your ${esc(supplier.name)} cart` : `in <code>${esc(filename)}</code>`}.</p>` +
         list('Left out — add these by hand on the supplier site', po.skipped.map(esc)) +
@@ -386,25 +387,30 @@
   }
   const list = (title, items) => (items.length ? `<p><b>${title}:</b></p><ul>${items.map((i) => `<li>${i}</li>`).join('')}</ul>` : '');
 
-  let btn;
+  let btn, fileBtn;
   const setLabel = (text) => {
     const s = supplierFor(vendorName());
     btn.textContent = text || (!s ? 'No import format for this vendor' : s.autoImport ? `🛒 ${s.name}: add to cart` : `⬇ ${s.name} import`);
     btn.disabled = !s;
     btn.title = !s ? `Vendor "${vendorName() || 'none'}" has no import format in the userscript`
-      : s.autoImport ? `Download the ${s.name} import file and add the items to your ${s.name} cart`
+      : s.autoImport ? `Add the items on this PO to your ${s.name} cart`
         : `Download the ${s.name} cart-import ${s.type.toUpperCase()} for this PO and open ${s.name} quick order`;
+    fileBtn.style.display = s?.autoImport ? '' : 'none'; // other suppliers' main button already downloads
+    if (s) fileBtn.title = `Only download the ${s.name} import file (${s.type.toUpperCase()}); nothing is added to the cart`;
   };
 
   function addButton() {
     const actions = document.querySelector('ul.dropdown-menu a[href$=".csv"]')?.closest('.btn-group');
     if (!actions || document.getElementById('rspo-btn')) return;
-    btn = Object.assign(document.createElement('button'), { id: 'rspo-btn', type: 'button', className: 'btn btn-success btn-sm' });
-    btn.onclick = () => {
-      const s = supplierFor(vendorName()); // read at click time: vendor can be changed inline
-      if (s) exportFor(s);
-    };
+    // read the vendor at click time: it can be changed inline on the page
+    const make = (id, cls, text, fileOnly) => Object.assign(document.createElement('button'), {
+      id, type: 'button', className: cls, textContent: text,
+      onclick: () => { const s = supplierFor(vendorName()); if (s) exportFor(s, fileOnly); },
+    });
+    btn = make('rspo-btn', 'btn btn-success btn-sm', '', false);
+    fileBtn = make('rspo-file-btn', 'btn btn-default btn-sm', '⬇ File', true);
     actions.parentElement.insertBefore(btn, actions);
+    actions.parentElement.insertBefore(fileBtn, actions);
     setLabel();
   }
   addButton();
