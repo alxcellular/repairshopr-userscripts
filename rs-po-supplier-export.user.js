@@ -258,9 +258,11 @@
 
     const loaded = () => [...document.querySelectorAll('input')]
       .filter((i) => i.offsetHeight && (i.placeholder || '').trim() === 'SKU' && i.value.trim()).map((i) => i.value);
-    const notice = () => [...document.querySelectorAll('div')]
-      .filter((d) => d.offsetHeight && d.children.length < 4 && /do not match or do not exist/i.test(d.textContent))
-      .map((d) => d.innerText.replace(/\s+/g, ' ').replace(/\s*×\s*$/, '').trim())[0];
+    // the smallest visible element holding the message is the notice itself (its ancestors contain it too)
+    const notice = () => [...document.querySelectorAll('div, p, span')]
+      .filter((d) => d.offsetHeight && /do not match or do not exist/i.test(d.textContent))
+      .map((d) => d.innerText.replace(/\s+/g, ' ').replace(/\s*×\s*$/, '').trim())
+      .sort((a, b) => a.length - b.length)[0];
     await waitFor(() => loaded().length || notice(), 20000, 'Injured Gadgets did not read the file');
     await sleep(1000); // rows and the notice come from the same lookup; let both render
     const rejected = notice();
