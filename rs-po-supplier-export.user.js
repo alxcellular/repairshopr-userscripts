@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RepairShopr PO → Supplier Import File
 // @namespace    https://alxcellular.repairshopr.com/
-// @version      1.5.1
-// @description  Adds one button to a RepairShopr Purchase Order that puts the PO's items into the vendor's cart (Mobile Sentrix, WGP, Phone LCD Parts) or downloads the vendor's cart-import file (Injured Gadgets) and opens its quick-order page.
+// @version      1.6.0
+// @description  Adds one button to a RepairShopr Purchase Order that puts the PO's items into the vendor's cart (Mobile Sentrix, WGP, Injured Gadgets, Phone LCD Parts), with a separate button to just download the vendor's cart-import file.
 // @homepageURL  https://github.com/alxcellular/repairshopr-userscripts
 // @updateURL    https://raw.githubusercontent.com/alxcellular/repairshopr-userscripts/main/rs-po-supplier-export.user.js
 // @downloadURL  https://raw.githubusercontent.com/alxcellular/repairshopr-userscripts/main/rs-po-supplier-export.user.js
@@ -11,6 +11,8 @@
 // @match        https://wgp.com/quick-order*
 // @match        https://www.phonelcdparts.com/quickorder/index/view*
 // @match        https://www.phonelcdparts.com/checkout/cart*
+// @match        https://www.injuredgadgets.com/expressorder/index/view*
+// @match        https://www.injuredgadgets.com/checkout/cart*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
@@ -47,9 +49,9 @@
       autoImport: wgpImport,
     },
     {
-      // Quick order is switched off for our Injured Gadgets account, so this one stays download-only
       name: 'Injured Gadgets', match: /^injured\s*gadgets$/i, type: 'csv', header: ['sku', 'qty'],
       orderUrl: 'https://www.injuredgadgets.com/expressorder/index/view',
+      autoImport: injuredGadgetsImport,
     },
     {
       name: 'Phone LCD Parts', match: /^phone\s*lcd\s*parts$/i, type: 'csv', header: ['sku', 'qty'],
@@ -242,6 +244,50 @@
       return { ok: false, html: `<b>${esc(job.poNumber)}</b>: WGP added the other items to your cart, but not these:${listHtml(lines)}Add them another way or leave them off.` };
     }
     return { kind: 'err', html: `<b>${esc(job.poNumber)}</b>: WGP added nothing to the cart:${listHtml(lines)}` };
+  }
+
+  // Injured Gadgets quick order (Next.js): CSV → SKU rows (unknown SKUs listed in a notice) →
+  // "Add To Cart" → "✓ N items added to cart" toast and an in-app move to /checkout/cart. The table
+  // pages 10 rows at a time, so the added count comes from the toast, not from counting rows.
+  async function injuredGadgetsImport(file, job) {
+    const input = await waitFor(() => document.querySelector('input[type=file][accept*="csv"]'), 15000, 'the upload box was not found');
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const loaded = () => [...document.querySelectorAll('input')]
+      .filter((i) => i.offsetHeight && (i.placeholder || '').trim() === 'SKU' && i.value.trim()).map((i) => i.value);
+    const notice = () => [...document.querySelectorAll('div')]
+      .filter((d) => d.offsetHeight && d.children.length < 4 && /do not match or do not exist/i.test(d.textContent))
+      .map((d) => d.innerText.replace(/\s+/g, ' ').replace(/\s*×\s*$/, '').trim())[0];
+    await waitFor(() => loaded().length || notice(), 20000, 'Injured Gadgets did not read the file');
+    await sleep(1000); // rows and the notice come from the same lookup; let both render
+    const rejected = notice();
+    if (!loaded().length) {
+      return { kind: 'err', html: `<b>${esc(job.poNumber)}</b>: Injured Gadgets didn't recognise any of the SKUs, so nothing was added.${rejected ? `<br>${esc(rejected)}` : ''}` };
+    }
+    // the notice reads "SKU1, SKU2 do not match or do not exist on the site."; the PO's other lines should all be added
+    const rejectedSkus = new Set((rejected || '').replace(/\s*do not match.*$/i, '').split(/[,\s]+/).filter(Boolean).map((x) => x.toUpperCase()));
+    const expected = job.lines.filter(([sku]) => !rejectedSkus.has(String(sku).trim().toUpperCase())).length;
+
+    const addBtn = [...document.querySelectorAll('button')].find((b) => b.offsetHeight && /^\s*add to cart\s*$/i.test(b.textContent));
+    if (!addBtn) throw new Error('the Add To Cart button was not found');
+    const toast = () => (document.body.innerText.match(/(\d+)\s+items?\s+added to cart/i) || [])[1];
+    const report = (added) => {
+      const short = added !== undefined && Number(added) < expected
+        ? ` Only ${added} of the ${expected} expected item(s) were added — check the cart.` : '';
+      if (rejected || short) {
+        return { kind: 'warn', html: `<b>${esc(job.poNumber)}</b>: added ${added ?? 'the'} item(s) to your Injured Gadgets cart.${short}` +
+          (rejected ? ` Not added:${listHtml([rejected])}` : '') };
+      }
+      return { ok: true, html: `✓ Added <b>${esc(job.poNumber)}</b> to your Injured Gadgets cart: ${added ?? expected} items, ${job.units} units. Review the cart before checking out.` };
+    };
+    GM_setValue(REPORT_KEY, { supplier: 'Injured Gadgets', at: Date.now(), ...report() }); // shown on the cart page if it fully reloads
+    addBtn.click();
+    const added = await waitFor(toast, 30000, 'Injured Gadgets did not confirm the cart update');
+    GM_deleteValue(REPORT_KEY);
+    return report(added);
   }
 
   // Phone LCD Parts quick order: CSV → product rows → "Add to Cart" posts the rows and opens the cart
